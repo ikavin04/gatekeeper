@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 
 type User = { id: number; email: string; role: 'user' | 'admin'; created_at: string }
@@ -9,7 +9,14 @@ type AccessRequest = {
 }
 type AuditEvent = { id: number; actor_email?: string | null; action: string; object_type: string; object_id?: string | null; details: string; created_at: string }
 type ApiError = { error?: string }
+type View = 'overview' | 'audit'
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api').replace(/\/$/, '')
+const templates = [
+  { name: 'Staging review', system: 'Staging dashboard', reason: 'Validate a release and review CI logs.' },
+  { name: 'Incident response', system: 'Production logs', reason: 'Investigate and document an active incident.' },
+  { name: 'Data analysis', system: 'Analytics workspace', reason: 'Complete an approved analysis for the team.' },
+]
 
 async function api<T>(path: string, token?: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
@@ -19,6 +26,18 @@ async function api<T>(path: string, token?: string, init: RequestInit = {}): Pro
   const payload = await response.json().catch(() => ({})) as T & ApiError
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`)
   return payload
+}
+
+function formatDate(value: string) {
+  return new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function initials(email: string) {
+  return email.slice(0, 1).toUpperCase()
+}
+
+function StatusIcon({ status }: { status: AccessRequest['status'] }) {
+  return <span className={`status-dot ${status}`} aria-hidden="true" />
 }
 
 export default function App() {
@@ -33,6 +52,9 @@ export default function App() {
   const [requests, setRequests] = useState<AccessRequest[]>([])
   const [events, setEvents] = useState<AuditEvent[]>([])
   const [decisionNotes, setDecisionNotes] = useState<Record<number, string>>({})
+  const [view, setView] = useState<View>('overview')
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<'all' | AccessRequest['status']>('all')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -74,8 +96,7 @@ export default function App() {
       })
       sessionStorage.setItem('gatekeeper_token', data.access_token)
       setUser(data.user); setToken(data.access_token); setPassword('')
-      setNotice(`Signed in as ${data.user.role}.`)
-    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to sign in.') }
+    } catch (e) { setError(e instanceof Error ? e.message : 'Unable to continue.') }
     finally { setBusy(false) }
   }
 
@@ -86,7 +107,7 @@ export default function App() {
       await api('/requests', token, { method: 'POST', body: JSON.stringify({ system_name: systemName, reason, duration_days: durationDays }) })
       setSystemName(''); setReason(''); setDurationDays(7)
       if (user) await refresh(token, user)
-      setNotice('Access request submitted for review.')
+      setNotice('Request submitted. Your reviewer has been notified.')
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to submit request.') }
     finally { setBusy(false) }
   }
@@ -97,54 +118,58 @@ export default function App() {
     try {
       await api(`/admin/requests/${id}/decision`, token, { method: 'POST', body: JSON.stringify({ decision, note: decisionNotes[id] || '' }) })
       await refresh(token, user)
-      setNotice(`Request #${id} ${decision}.`)
+      setNotice(`Request REQ-${String(id).padStart(4, '0')} ${decision}.`)
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to update request.') }
     finally { setBusy(false) }
   }
 
   function logout() {
-    sessionStorage.removeItem('gatekeeper_token'); setToken(''); setUser(null); setRequests([]); setEvents([]); setNotice('Signed out.')
+    sessionStorage.removeItem('gatekeeper_token'); setToken(''); setUser(null); setRequests([]); setEvents([])
   }
+
+  const passwordScore = [password.length >= 12, /[A-Z]/.test(password), /[0-9]/.test(password), /[^A-Za-z0-9]/.test(password)].filter(Boolean).length
+  const pending = requests.filter(item => item.status === 'pending').length
+  const approved = requests.filter(item => item.status === 'approved').length
+  const visibleRequests = useMemo(() => requests.filter(item => {
+    const matchesFilter = filter === 'all' || item.status === filter
+    const haystack = `${item.system_name} ${item.reason} ${item.requester_email}`.toLowerCase()
+    return matchesFilter && haystack.includes(query.toLowerCase())
+  }), [filter, query, requests])
 
   if (!token || !user) {
     return <main className="auth-shell">
+      <section className="auth-pitch">
+        <div className="brand"><div className="brand-mark">G</div><div><strong>Gatekeeper</strong><span>Access governance, made clear.</span></div></div>
+        <div className="pitch-copy"><p className="eyebrow">THE ACCESS CONTROL HUB</p><h1>Make every permission <em>intentional.</em></h1><p>One calm workspace for requesting, reviewing and proving who has access to what.</p></div>
+        <div className="pitch-points"><span><b>01</b> Least privilege by default</span><span><b>02</b> Decisions with context</span><span><b>03</b> An audit trail you can trust</span></div>
+      </section>
       <section className="auth-card">
-        <div className="brand-mark">G</div>
-        <p className="eyebrow">ACCESS GOVERNANCE DEMO</p>
-        <h1>Gatekeeper</h1>
-        <p className="muted">Make access requests traceable, reviewable and accountable.</p>
-        <div className="tabs"><button className={mode === 'login' ? 'tab active' : 'tab'} onClick={() => setMode('login')}>Sign in</button><button className={mode === 'register' ? 'tab active' : 'tab'} onClick={() => setMode('register')}>Create account</button></div>
+        <p className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : 'GET STARTED'}</p><h2>{mode === 'login' ? 'Sign in to your workspace' : 'Create your account'}</h2><p className="muted">{mode === 'login' ? 'Continue managing access with confidence.' : 'Join your team\'s accountable access workflow.'}</p>
+        <div className="tabs"><button className={mode === 'login' ? 'tab active' : 'tab'} onClick={() => { setMode('login'); setError('') }}>Sign in</button><button className={mode === 'register' ? 'tab active' : 'tab'} onClick={() => { setMode('register'); setError('') }}>Create account</button></div>
         <form onSubmit={submitAuth} className="stack-form">
-          <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" required /></label>
-          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 12 : 1} required />{mode === 'register' && <small>Use at least 12 characters.</small>}</label>
-          <button className="primary full" disabled={busy}>{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}</button>
+          <label>Email address<input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" autoComplete="email" required /></label>
+          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder={mode === 'register' ? 'At least 12 characters' : 'Your password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 12 : 1} required />{mode === 'register' && <><div className="strength"><span className={`strength-bar score-${passwordScore}`} /><span>{passwordScore < 2 ? 'Build a stronger password' : passwordScore < 4 ? 'Good start' : 'Strong password'}</span></div></>}</label>
+          <button className="primary full" disabled={busy}>{busy ? 'Please wait...' : mode === 'login' ? 'Enter workspace' : 'Create account'} <span aria-hidden="true">→</span></button>
         </form>
-        {error && <p className="alert error">{error}</p>}{notice && <p className="alert success">{notice}</p>}
-        <p className="fine-print">Demo project. Create an administrator through the backend setup instructions; public registration can only create regular users.</p>
+        {error && <p className="alert error">{error}</p>}
+        <p className="fine-print">Public accounts start with regular-user access. Administrators are provisioned separately to protect your workspace.</p>
       </section>
     </main>
   }
 
-  const pending = requests.filter(item => item.status === 'pending').length
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><div className="brand-mark small">G</div><div><strong>Gatekeeper</strong><span>Access governance</span></div></div><div className="topbar-right"><span className="role-pill">{user.role}</span><span className="user-email">{user.email}</span><button className="secondary" onClick={logout}>Sign out</button></div></header>
-    <section className="hero"><div><p className="eyebrow">CONTROLLED ACCESS WORKFLOW</p><h1>Access, with accountability.</h1><p>Request the minimum access you need. Reviewers make decisions with an auditable trail.</p></div><div className="hero-stats"><div><span>{requests.length}</span><small>{user.role === 'admin' ? 'Total requests' : 'Your requests'}</small></div><div><span>{pending}</span><small>Pending review</small></div></div></section>
+    <header className="topbar"><div className="brand"><div className="brand-mark small">G</div><div><strong>Gatekeeper</strong><span>Access governance</span></div></div><nav className="main-nav"><button className={view === 'overview' ? 'nav-link active' : 'nav-link'} onClick={() => setView('overview')}>Overview</button>{user.role === 'admin' && <button className={view === 'audit' ? 'nav-link active' : 'nav-link'} onClick={() => setView('audit')}>Audit trail <span>{events.length}</span></button>}</nav><div className="topbar-right"><div className="avatar">{initials(user.email)}</div><div className="identity"><strong>{user.email.split('@')[0]}</strong><span>{user.role === 'admin' ? 'Workspace administrator' : 'Member'}</span></div><button className="secondary" onClick={logout}>Sign out</button></div></header>
+    <section className="hero"><div><p className="eyebrow">{user.role === 'admin' ? 'REVIEW WORKSPACE' : 'YOUR ACCESS WORKSPACE'}</p><h1>{user.role === 'admin' ? 'Keep access moving.' : 'Access, with accountability.'}</h1><p>{user.role === 'admin' ? 'Review requests with the context you need, and leave a clear trail behind.' : 'Request only what you need, for only as long as you need it.'}</p></div><div className="hero-stats"><div><span>{requests.length}</span><small>{user.role === 'admin' ? 'Total requests' : 'My requests'}</small></div><div className="stat-highlight"><span>{pending}</span><small>Needs attention</small></div><div><span>{approved}</span><small>Approved</small></div></div></section>
     {error && <p className="alert error">{error}</p>}{notice && <p className="alert success">{notice}</p>}
-    <div className="content-grid">
-      <section className="panel"><div className="panel-heading"><div><p className="eyebrow">NEW REQUEST</p><h2>Request system access</h2></div><span className="step-tag">01 / Submit</span></div>
-        <form className="stack-form" onSubmit={submitRequest}>
-          <label>System or resource<input value={systemName} onChange={e => setSystemName(e.target.value)} placeholder="e.g. Staging dashboard" maxLength={100} required /></label>
-          <label>Business reason<textarea value={reason} onChange={e => setReason(e.target.value)} placeholder="Explain the task this access supports…" rows={4} maxLength={1000} required /></label>
-          <label>Requested duration<select value={durationDays} onChange={e => setDurationDays(Number(e.target.value))}>{[1,3,7,14,30,60,90].map(n => <option key={n} value={n}>{n} day{n > 1 ? 's' : ''}</option>)}</select></label>
-          <button className="primary" disabled={busy}>Submit for approval <span aria-hidden="true">→</span></button>
-        </form><p className="fine-print">Access is only a request until an authorised reviewer makes a decision.</p>
+    {view === 'overview' ? <><div className="content-grid">
+      <section className="panel request-form-panel"><div className="panel-heading"><div><p className="eyebrow">NEW REQUEST</p><h2>Ask for access</h2></div><span className="step-tag">01 / 02</span></div><p className="panel-intro">Tell a reviewer what you need and why. Specific context helps decisions happen faster.</p>
+        <div className="template-row"><span>Start with a template</span>{templates.map(template => <button key={template.name} className="template" onClick={() => { setSystemName(template.system); setReason(template.reason) }}>{template.name}</button>)}</div>
+        <form className="stack-form" onSubmit={submitRequest}><label>System or resource<input value={systemName} onChange={e => setSystemName(e.target.value)} placeholder="e.g. Staging dashboard" maxLength={100} required /></label><label>Business reason<textarea value={reason} onChange={e => setReason(e.target.value)} placeholder="What task does this access support?" rows={4} maxLength={1000} required /><small className="char-count">{reason.length}/1000</small></label><div className="duration-row"><label>Access duration<select value={durationDays} onChange={e => setDurationDays(Number(e.target.value))}>{[1,3,7,14,30,60,90].map(n => <option key={n} value={n}>{n} day{n > 1 ? 's' : ''}</option>)}</select></label><div className="expiry-note"><span>◷</span><p>Expires automatically<br /><strong>{new Date(Date.now() + durationDays * 86400000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</strong></p></div></div><button className="primary" disabled={busy}>Submit for approval <span aria-hidden="true">→</span></button></form>
       </section>
-      <section className="panel requests-panel"><div className="panel-heading"><div><p className="eyebrow">WORK QUEUE</p><h2>{user.role === 'admin' ? 'Requests to review' : 'Your requests'}</h2></div><span className="count-pill">{requests.length}</span></div>
-        {requests.length === 0 ? <div className="empty"><span>↗</span><strong>No requests yet</strong><p>Submitted access requests will appear here.</p></div> : <div className="request-list">{requests.map(item => <article className="request-card" key={item.id}><div className="request-top"><div><span className="request-id">REQ-{String(item.id).padStart(4, '0')}</span><h3>{item.system_name}</h3></div><span className={`status ${item.status}`}>{item.status}</span></div><p className="reason">{item.reason}</p><div className="meta"><span>{item.requester_email}</span><span>{item.duration_days} days</span><span>{new Date(item.created_at).toLocaleDateString()}</span></div>{item.decision_note && <p className="decision-note">Reviewer note: {item.decision_note}</p>}
-          {user.role === 'admin' && item.status === 'pending' && <div className="review-controls"><input aria-label={`Review note for request ${item.id}`} placeholder="Optional reviewer note" value={decisionNotes[item.id] || ''} onChange={e => setDecisionNotes(prev => ({ ...prev, [item.id]: e.target.value }))} /><button disabled={busy} className="approve" onClick={() => decide(item.id, 'approved')}>Approve</button><button disabled={busy} className="reject" onClick={() => decide(item.id, 'rejected')}>Reject</button></div>}</article>)}</div>}
+      <section className="panel requests-panel"><div className="panel-heading"><div><p className="eyebrow">WORK QUEUE</p><h2>{user.role === 'admin' ? 'Requests to review' : 'Your requests'}</h2></div><span className="count-pill">{visibleRequests.length} shown</span></div><div className="list-tools"><label className="search"><span>⌕</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search requests..." /></label><select value={filter} onChange={e => setFilter(e.target.value as typeof filter)} aria-label="Filter requests"><option value="all">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select></div>
+        {visibleRequests.length === 0 ? <div className="empty"><span>✓</span><strong>{requests.length ? 'No matching requests' : 'Your queue is clear'}</strong><p>{requests.length ? 'Try another search or status filter.' : 'New access requests will appear here.'}</p></div> : <div className="request-list">{visibleRequests.map(item => <article className="request-card" key={item.id}><div className="request-top"><div className="request-title"><span className="request-id"><StatusIcon status={item.status} />REQ-{String(item.id).padStart(4, '0')}</span><h3>{item.system_name}</h3></div><span className={`status ${item.status}`}>{item.status}</span></div><p className="reason">{item.reason}</p><div className="meta"><span>{user.role === 'admin' ? item.requester_email : 'Submitted by you'}</span><span>{item.duration_days} days</span><span>{formatDate(item.created_at)}</span></div>{item.decision_note && <p className="decision-note"><b>Reviewer note</b> {item.decision_note}</p>}{user.role === 'admin' && item.status === 'pending' && <div className="review-controls"><input aria-label={`Review note for request ${item.id}`} placeholder="Add a note (optional)" value={decisionNotes[item.id] || ''} onChange={e => setDecisionNotes(prev => ({ ...prev, [item.id]: e.target.value }))} /><button disabled={busy} className="approve" onClick={() => decide(item.id, 'approved')}>Approve</button><button disabled={busy} className="reject" onClick={() => decide(item.id, 'rejected')}>Reject</button></div>}</article>)}</div>}
       </section>
-    </div>
-    {user.role === 'admin' && <section className="panel audit-panel"><div className="panel-heading"><div><p className="eyebrow">TRACEABILITY</p><h2>Audit events</h2></div><span className="count-pill">{events.length}</span></div>{events.length === 0 ? <p className="muted">No events recorded yet.</p> : <div className="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Object</th><th>Details</th></tr></thead><tbody>{events.map(event => <tr key={event.id}><td>{new Date(event.created_at).toLocaleString()}</td><td>{event.actor_email || 'System'}</td><td><code>{event.action}</code></td><td>{event.object_type} {event.object_id ? `#${event.object_id}` : ''}</td><td>{event.details}</td></tr>)}</tbody></table></div>}</section>}
-    <footer>Gatekeeper · Student portfolio project · Least privilege · Auditable decisions</footer>
+    </div><section className="principles"><div><span className="principle-icon">◈</span><div><strong>Least privilege</strong><p>Short-lived access keeps your risk surface small.</p></div></div><div><span className="principle-icon">◎</span><div><strong>Human decisions</strong><p>Every approval has a person and a reason behind it.</p></div></div><div><span className="principle-icon">↗</span><div><strong>Always traceable</strong><p>Review the complete story whenever you need it.</p></div></div></section></> : <section className="panel audit-page"><div className="panel-heading"><div><p className="eyebrow">TRACEABILITY</p><h2>Audit trail</h2><p className="panel-intro">A chronological record of account and access decisions.</p></div><span className="count-pill">{events.length} events</span></div>{events.length === 0 ? <div className="empty"><span>◎</span><strong>No events recorded yet</strong><p>Activity will appear as your workspace is used.</p></div> : <div className="audit-timeline">{events.map(event => <article className="timeline-item" key={event.id}><span className="timeline-dot" /><div><div className="timeline-meta"><code>{event.action}</code><span>{new Date(event.created_at).toLocaleString()}</span></div><strong>{event.actor_email || 'System'}</strong><p>{event.details} <span className="object-ref">{event.object_type}{event.object_id ? ` #${event.object_id}` : ''}</span></p></div></article>)}</div>}</section>}
+    <footer>Gatekeeper <span>·</span> Built for accountable access <span>·</span> {user.role === 'admin' ? 'Administrator workspace' : 'Member workspace'}</footer>
   </main>
 }

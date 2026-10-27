@@ -68,6 +68,21 @@ pytest -q
 
 The tests cover health checks, headers, registration role restrictions, password validation, request creation, invalid fields, admin-only decisions and audit events. They use an isolated SQLite test database.
 
+## Run against an existing local PostgreSQL server
+
+If PostgreSQL is already installed on Windows, create a database named `gatekeeper`, then run the backend with a connection URL. Do not commit the password or place it in tracked files:
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+$env:DATABASE_URL = "postgresql+psycopg://postgres:<URL_ENCODED_PASSWORD>@127.0.0.1:5432/gatekeeper"
+$env:JWT_SECRET_KEY = "use-a-long-random-local-secret"
+python init_db.py
+python -m flask --app run.py run --host=127.0.0.1 --port=5000
+```
+
+Replace `<URL_ENCODED_PASSWORD>` with the PostgreSQL password. If the password contains characters such as `@`, `:`, `/` or `#`, URL-encode it first. The default Docker Compose setup remains separate and uses its own `gatekeeper` database role.
+
 ## API overview
 
 | Method | Endpoint | Access | Purpose |
